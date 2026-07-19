@@ -42,6 +42,7 @@
 #include "PushRod.h"
 #include "QRScanner.h"
 #include "Turntable.h"
+#include "TaskFlow.h"
 
 // ============================================================================
 //  电机旁路宏 — 当 DEBUG_MOTOR_BYPASS=1 时生效
@@ -170,6 +171,7 @@ void setup() {
 #endif
 #else
     DEBUG_SERIAL.println(F("[MODE] Normal"));
+    TaskFlow_Init();
 #endif
 }
 
@@ -460,12 +462,9 @@ void loop() {
 #else
     // ==================================================================
     //  Normal Mode (MAIN_DEBUG=0)
-    //  后续在此添加任务流程代码
-    //  底盘和扫码器持续运行
+    //  运行任务流程，流程内部自动调度各模块
     // ==================================================================
-    Cart.update();
-    Scanner.update();
-    TurntableMotor.update();
+    TaskFlow_Update();
     delay(1);
 #endif
 }
