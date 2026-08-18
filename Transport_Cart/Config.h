@@ -58,8 +58,9 @@ const uint8_t LS_BACK_PINS[LS_BACK_COUNT] = {
 // ========================
 // 二维码扫描模块
 // ========================
-// 通过 Serial3 与二维码模块通讯，采用命令触发模式
-// 调用 triggerScan() 发送指令启动一次扫码，模块返回结果
+// 通过 Serial3 与二维码模块通讯 (9600bps)
+// 模块为自动输出模式: 扫码成功后自动发送 内容ASCII + 回车(0x0D)
+//   例: 扫"1" → 0x31 0x0D; 扫"5" → 0x35 0x0D; 数字 10~16 → 两位 ASCII + 0x0D
 #define QR_SERIAL           Serial3
 #define QR_BAUD_RATE        9600
 
@@ -114,6 +115,22 @@ const uint8_t LS_BACK_PINS[LS_BACK_COUNT] = {
 // 转盘 72° 对应步数 = 6400 × 72/360 = 1280
 // 144° = 2560 步, 216° = 3840 步（由代码中乘以倍数得到）
 #define TURNTABLE_STEPS_PER_72DEG   ((long)(STEPPER_STEPS_PER_REV * 72.0f / 360.0f))
+
+// ========================
+// TCS230 颜色传感器（8 针模块）
+//   S0/S1/S2/S3/OUT/OE + VCC/GND，板上白光 LED 常亮（无独立 LED 脚）
+//   OUT 输出频率与所选通道光强成正比，用外部中断计数测频
+// ========================
+#define COLOR_S0_PIN    50
+#define COLOR_S1_PIN    51
+#define COLOR_S2_PIN    52
+#define COLOR_S3_PIN    53
+#define COLOR_OE_PIN    49
+#define COLOR_OUT_PIN   2       // Mega 外部中断 INT0 (D2)
+
+// 频率缩放: S0=LOW, S1=HIGH → 2% 输出（拉长脉冲，降低中断频率）
+// 单通道采样窗口 (us): 4 通道一轮约 4 × 窗口
+#define COLOR_SAMPLE_WINDOW_US   100000UL
 
 // ========================
 // 循迹修正参数

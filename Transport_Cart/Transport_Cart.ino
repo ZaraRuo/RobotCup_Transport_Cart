@@ -22,10 +22,11 @@
 //    DEBUG_STAGE=7: 二维码扫描测试 (轮询接收 + 打印结果)
 //    DEBUG_STAGE=8: 原地旋转测试 (45/90/180度 CW+CCW, 标定用)
 //    DEBUG_STAGE=9: 转盘步进电机测试 (72/144/216度 CCW+CW)
+//    DEBUG_STAGE=10: 颜色传感器测试 (TCS230, 实时识别 + 串口白平衡)
 //  MAIN_DEBUG=0   -> 完整工作模式 (后续添加任务流程)
 // ============================================================================
 #define MAIN_DEBUG           1
-#define DEBUG_STAGE          5
+#define DEBUG_STAGE          10
 
 // 电机旁路模式（纯算法调试，不驱动实际电机）
 // DEBUG_MOTOR_BYPASS=1: 所有电机控制指令只打印日志，不输出脉冲
@@ -42,6 +43,7 @@
 #include "PushRod.h"
 #include "QRScanner.h"
 #include "Turntable.h"
+#include "ColorSensor.h"
 #include "TaskFlow.h"
 
 // ============================================================================
@@ -159,6 +161,7 @@ void setup() {
     PushRod_Init();      // 电动推杆
     QRScanner_Init();    // 二维码扫描
     Turntable_Init();    // 转盘步进电机
+    ColorSensor_Init();  // TCS230 颜色传感器
     Chassis_Init();      // 底盘状态机
 
     DEBUG_SERIAL.println(F("[OK] All modules initialized."));
@@ -316,44 +319,27 @@ void loop() {
 
     // ==================================================================
     //  Stage 7: 二维码扫描测试
-    //  验证: Serial3 通讯、二维码模块响应、数据解析
+    //  验证: Serial3 通讯、模块输出格式、数据解析
     //  操作: 将二维码放在模块前方，观察串口输出
-    //  机制: Scanner.update() 不断从 Serial3 收数据→超时200ms→解析为int
+    //  机制: 模块自动输出模式——扫码成功自动发送 内容ASCII+CR(0x0D)，
+    //        Scanner.update() 按 CR/LF 分帧并解析为整数 (1~16)
     // ==================================================================
 #elif DEBUG_STAGE == 7
     {
         DEBUG_SERIAL.println(F("\r\n========================================"));
         DEBUG_SERIAL.println(F("  Stage 7: QR Code Scan"));
         DEBUG_SERIAL.println(F("========================================"));
-        DEBUG_SERIAL.println(F("  Trigger mode: Serial command"));
+        DEBUG_SERIAL.println(F("  Auto mode: module sends content + CR on scan"));
         DEBUG_SERIAL.println(F("  [ACTION] Present QR code to scanner"));
         DEBUG_SERIAL.println(F("========================================\r\n"));
-
-        uint32_t tick = 0;
-        Scanner.triggerScan();  // 首次触发
 
         while (1) {
             Scanner.update();
 
             if (Scanner.available()) {
-                DEBUG_SERIAL.print(F("["));
-                DEBUG_SERIAL.print(tick / 10);
-                DEBUG_SERIAL.print(F("s] QR detected: "));
+                DEBUG_SERIAL.print(F("[QR] detected: "));
                 DEBUG_SERIAL.println(Scanner.result());
-                delay(1500);
-                Scanner.triggerScan();  // 触发下一次
             }
-
-            // 每 5 秒自动重新触发一次（防止超时后死等）
-            if (tick % 50 == 0 && !Scanner.available()) {
-                Scanner.triggerScan();
-                DEBUG_SERIAL.print(F("["));
-                DEBUG_SERIAL.print(tick / 10);
-                DEBUG_SERIAL.println(F("s] Trigger scan..."));
-            }
-
-            delay(100);
-            tick++;
         }
     }
 
@@ -455,6 +441,72 @@ void loop() {
         while (!TurntableMotor.isDone()) { TurntableMotor.update(); }
 
         while (1) { delay(1000); }
+    }
+
+    // ==================================================================
+    //  Stage 10: TCS230 颜色传感器测试
+    //  验证: 传感器接线、白平衡标定、五色识别准确性
+    //  操作: 将传感器探头贴近物料表面（避免环境光直射）
+    //  输出: 每轮(约 4×100ms)打印一次 C/R/G/B 原始计数值 +
+    //        白平衡归一化值 + 识别颜色
+    //  指令: 串口发送 'w' 执行白平衡（先把传感器对准白色表面再发送）
+    // ==================================================================
+#elif DEBUG_STAGE == 10
+    {
+        DEBUG_SERIAL.println(F("\r\n========================================"));
+        DEBUG_SERIAL.println(F("  Stage 10: TCS230 Color Sensor"));
+        DEBUG_SERIAL.println(F("========================================"));
+        DEBUG_SERIAL.println(F("  [ACTION] Hold sensor close to a colored block"));
+        DEBUG_SERIAL.println(F("  [CMD] 'w' = white balance over WHITE surface"));
+        DEBUG_SERIAL.println(F("  Output: raw counts + normalized RGB + color"));
+        DEBUG_SERIAL.println(F("========================================\r\n"));
+
+        ColorSensors.begin();
+
+        while (1) {
+            ColorSensors.update();
+
+            if (ColorSensors.available()) {
+                const char *name;
+                switch (ColorSensors.color()) {
+                case ColorSensor::COLOR_NONE:  name = "NONE";  break;
+                case ColorSensor::COLOR_GREEN: name = "GREEN"; break;
+                case ColorSensor::COLOR_WHITE: name = "WHITE"; break;
+                case ColorSensor::COLOR_RED:   name = "RED";   break;
+                case ColorSensor::COLOR_BLACK: name = "BLACK"; break;
+                case ColorSensor::COLOR_BLUE:  name = "BLUE";  break;
+                default:                       name = "?";     break;
+                }
+
+                DEBUG_SERIAL.print(F("  C="));
+                DEBUG_SERIAL.print(ColorSensors.rawClear());
+                DEBUG_SERIAL.print(F(" R="));
+                DEBUG_SERIAL.print(ColorSensors.rawRed());
+                DEBUG_SERIAL.print(F(" G="));
+                DEBUG_SERIAL.print(ColorSensors.rawGreen());
+                DEBUG_SERIAL.print(F(" B="));
+                DEBUG_SERIAL.print(ColorSensors.rawBlue());
+                DEBUG_SERIAL.print(F(" | nR="));
+                DEBUG_SERIAL.print((int)ColorSensors.normRed());
+                DEBUG_SERIAL.print(F(" nG="));
+                DEBUG_SERIAL.print((int)ColorSensors.normGreen());
+                DEBUG_SERIAL.print(F(" nB="));
+                DEBUG_SERIAL.print((int)ColorSensors.normBlue());
+                DEBUG_SERIAL.print(F(" | color="));
+                DEBUG_SERIAL.println(name);
+
+                ColorSensors.begin();   // 开始下一轮测量
+            }
+
+            // 串口指令: 'w' 触发白平衡标定（传感器须对准白色表面）
+            if (DEBUG_SERIAL.available()) {
+                char c = (char)DEBUG_SERIAL.read();
+                if (c == 'w' || c == 'W') {
+                    DEBUG_SERIAL.println(F("[WB] Hold sensor over WHITE, measuring..."));
+                    ColorSensors.beginWhiteBalance();
+                }
+            }
+        }
     }
 
 #endif
