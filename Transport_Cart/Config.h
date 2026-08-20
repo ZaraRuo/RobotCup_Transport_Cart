@@ -55,6 +55,10 @@ const uint8_t LS_BACK_PINS[LS_BACK_COUNT] = {
 #define PUSH_ROD_IN2_PIN    23
 #define PUSH_ROD_ENA_PIN    24
 
+// 推杆单程全程运行时间 (ms)
+// 伸到顶/伸到底各运行该时长后自动停止（推杆无位置反馈，靠时间覆盖全程）
+#define PUSH_ROD_TRAVEL_MS  10000UL
+
 // ========================
 // 二维码扫描模块
 // ========================
@@ -115,6 +119,10 @@ const uint8_t LS_BACK_PINS[LS_BACK_COUNT] = {
 // 转盘 72° 对应步数 = 6400 × 72/360 = 1280
 // 144° = 2560 步, 216° = 3840 步（由代码中乘以倍数得到）
 #define TURNTABLE_STEPS_PER_72DEG   ((long)(STEPPER_STEPS_PER_REV * 72.0f / 360.0f))
+
+// 颜色识别模块在转盘上的位置: 与车头开口的夹角（正对另一侧 = 180°）
+// 车头仓的物块转 TURNTABLE_SENSOR_DEG 即到识别模块处
+#define TURNTABLE_SENSOR_DEG        180.0f
 
 // ========================
 // TCS230 颜色传感器（8 针模块）

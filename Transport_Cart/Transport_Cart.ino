@@ -13,7 +13,7 @@
 //  调试模式配置
 // ============================================================================
 //  MAIN_DEBUG=1   -> 调试模式
-//    DEBUG_STAGE=1: 推杆基础测试 (伸缩/脉冲)
+//    DEBUG_STAGE=1: 推杆基础测试 (伸到顶/伸到底, 各10s)
 //    DEBUG_STAGE=2: 灰度传感器读数 (12路原始值 + 偏移量)
 //    DEBUG_STAGE=3: 步进电机单路测试 (左轮/右轮, 正转/反转)
 //    DEBUG_STAGE=4: 底盘直行测试 (前进300mm/后退150mm/旋转±90°)
@@ -21,12 +21,14 @@
 //    DEBUG_STAGE=6: 底盘后向循迹 (后退循迹)
 //    DEBUG_STAGE=7: 二维码扫描测试 (轮询接收 + 打印结果)
 //    DEBUG_STAGE=8: 原地旋转测试 (45/90/180度 CW+CCW, 标定用)
-//    DEBUG_STAGE=9: 转盘步进电机测试 (72/144/216度 CCW+CW)
+//    DEBUG_STAGE=9: 转盘 + 仓位管理测试 (72°旋转 + 仓位占用/定位)
 //    DEBUG_STAGE=10: 颜色传感器测试 (TCS230, 实时识别 + 串口白平衡)
+//    DEBUG_STAGE=11: 转盘+颜色识别联动测试 (车头仓转180°识别, 任务1流程)
+//    DEBUG_STAGE=12: 任务流程分段测试 (复用正式流程同一套代码)
 //  MAIN_DEBUG=0   -> 完整工作模式 (后续添加任务流程)
 // ============================================================================
 #define MAIN_DEBUG           1
-#define DEBUG_STAGE          10
+#define DEBUG_STAGE          7
 
 // 电机旁路模式（纯算法调试，不驱动实际电机）
 // DEBUG_MOTOR_BYPASS=1: 所有电机控制指令只打印日志，不输出脉冲
@@ -146,6 +148,35 @@ static void _motorTestSingle(const char *name, Stepper &motor) {
 #endif
 
 // ============================================================================
+//  Stage 7 辅助函数（仅 DEBUG_STAGE==7 时编译）
+//  调试输出全部放在调试阶段实现，功能模块(QRScanner)内不做任何串口打印
+// ============================================================================
+#if MAIN_DEBUG && DEBUG_STAGE == 7
+// 字节监听回调: 打印 Serial3 收到的原始字节 (HEX)，由 Scanner 每字节回调
+// 仅为观察，不改变任何接收/解析逻辑（与生产走同一段代码）
+static void qrByteEcho(uint8_t b) {
+    DEBUG_SERIAL.print(F("[RX3] 0x"));
+    if (b < 0x10) DEBUG_SERIAL.print('0');
+    DEBUG_SERIAL.println(b, HEX);
+}
+#endif
+
+// 颜色码转名称（Stage 10/11 用）
+#if MAIN_DEBUG && (DEBUG_STAGE == 10 || DEBUG_STAGE == 11)
+static const char *colorNameStr(uint8_t col) {
+    switch (col) {
+    case ColorSensor::COLOR_NONE:  return "NONE";
+    case ColorSensor::COLOR_GREEN: return "GREEN";
+    case ColorSensor::COLOR_WHITE: return "WHITE";
+    case ColorSensor::COLOR_RED:   return "RED";
+    case ColorSensor::COLOR_BLACK: return "BLACK";
+    case ColorSensor::COLOR_BLUE:  return "BLUE";
+    default:                       return "?";
+    }
+}
+#endif
+
+// ============================================================================
 //  setup() — 系统初始化入口
 //  执行顺序: 串口 → 各模块初始化 → 打印模式信息
 // ============================================================================
@@ -188,18 +219,16 @@ void loop() {
 
     // ==================================================================
     //  Stage 1: 推杆基础测试
-    //  验证: 推杆能否正常伸缩，物理行程是否正确
-    //  流程: 伸2秒→缩1秒→脉冲500ms → 重复3次
+    //  验证: 推杆伸到顶/伸到底的完整行程与运行时间(10s)
+    //  流程: 伸到顶(10s) → 停1s → 伸到底(10s) → 停1s，重复2次
     // ==================================================================
 #if DEBUG_STAGE == 1
     {
-        for (int i = 0; i < 3; i++) {
-            Rod.extend();
-            delay(2000);
-            Rod.retract();
+        for (int i = 0; i < 2; i++) {
+            Rod.extendToTop();
             delay(1000);
-            Rod.pulse(500);
-            delay(1500);
+            Rod.retractToBottom();
+            delay(1000);
         }
         while (1) { delay(1000); }
     }
@@ -320,24 +349,23 @@ void loop() {
     // ==================================================================
     //  Stage 7: 二维码扫描测试
     //  验证: Serial3 通讯、模块输出格式、数据解析
-    //  操作: 将二维码放在模块前方，观察串口输出
-    //  机制: 模块自动输出模式——扫码成功自动发送 内容ASCII+CR(0x0D)，
-    //        Scanner.update() 按 CR/LF 分帧并解析为整数 (1~16)
+    //  接收走与正常模式完全相同的代码路径: Scanner.update() 读 Serial3，
+    //  输出: 每个原始字节 [RX3] 0xXX (仅观察) + 每帧 [QR]: 数字
     // ==================================================================
 #elif DEBUG_STAGE == 7
     {
         DEBUG_SERIAL.println(F("\r\n========================================"));
         DEBUG_SERIAL.println(F("  Stage 7: QR Code Scan"));
-        DEBUG_SERIAL.println(F("========================================"));
-        DEBUG_SERIAL.println(F("  Auto mode: module sends content + CR on scan"));
-        DEBUG_SERIAL.println(F("  [ACTION] Present QR code to scanner"));
         DEBUG_SERIAL.println(F("========================================\r\n"));
+
+        // 注册字节监听回调（打印原始字节 HEX）——调试输出全部在调试阶段实现
+        Scanner.setByteListener(qrByteEcho);
 
         while (1) {
             Scanner.update();
 
             if (Scanner.available()) {
-                DEBUG_SERIAL.print(F("[QR] detected: "));
+                DEBUG_SERIAL.print(F("[QR]: "));
                 DEBUG_SERIAL.println(Scanner.result());
             }
         }
@@ -411,34 +439,66 @@ void loop() {
     }
 
     // ==================================================================
-    //  Stage 9: 转盘步进电机测试
-    //  验证: 转盘旋转精度、72°步数换算
-    //  流程: CCW 72°→CW回 → CCW 144°→CW回 → CCW 216°→CW回
+    //  Stage 9: 转盘 + 仓位管理测试
+    //  验证: 72°旋转精度、仓位索引推进、占用标记、rotateToCell 最短路径
+    //  流程:
+    //    1) 传统 72/144/216° CCW→CW 往返（旋转精度）
+    //    2) 仓位演示: 依次"占用车头仓→转一格"，共 5 次，打印各仓占用
+    //    3) rotateToCell(2) 最短路径定位到 2 号仓
+    //  说明: 上电后 0 号仓应对准车头开口；若转向相反需调整电机接线/换向约定
     // ==================================================================
 #elif DEBUG_STAGE == 9
     {
-        // 72° CCW → return
+        // ---- 1) 旋转精度往返 ----
         TurntableMotor.rotateMultiples(1, 200);
         while (!TurntableMotor.isDone()) { TurntableMotor.update(); }
-        delay(2000);
+        delay(1000);
         TurntableMotor.rotateMultiples(-1, 200);
         while (!TurntableMotor.isDone()) { TurntableMotor.update(); }
-        delay(2000);
+        delay(1000);
 
-        // 144° CCW → return
         TurntableMotor.rotateMultiples(2, 200);
         while (!TurntableMotor.isDone()) { TurntableMotor.update(); }
-        delay(2000);
+        delay(1000);
         TurntableMotor.rotateMultiples(-2, 200);
         while (!TurntableMotor.isDone()) { TurntableMotor.update(); }
-        delay(2000);
+        delay(1000);
 
-        // 216° CCW → return
         TurntableMotor.rotateMultiples(3, 200);
         while (!TurntableMotor.isDone()) { TurntableMotor.update(); }
-        delay(2000);
+        delay(1000);
         TurntableMotor.rotateMultiples(-3, 200);
         while (!TurntableMotor.isDone()) { TurntableMotor.update(); }
+        delay(1000);
+
+        // ---- 2) 仓位管理演示: 依次占用车头仓并转一格 ----
+        DEBUG_SERIAL.println(F("[TT] cell demo: occupy front -> rotate 1 cell x5"));
+        for (uint8_t i = 0; i < Turntable::CELL_COUNT; i++) {
+            TurntableMotor.occupyFront();   // 模拟收入一个物块
+            DEBUG_SERIAL.print(F("[TT] occupied cell "));
+            DEBUG_SERIAL.print(TurntableMotor.frontCell());
+            DEBUG_SERIAL.print(F(", front now "));
+            TurntableMotor.rotateMultiples(1, 200);
+            while (!TurntableMotor.isDone()) { TurntableMotor.update(); }
+            DEBUG_SERIAL.println(TurntableMotor.frontCell());
+        }
+        // 打印各仓占用
+        DEBUG_SERIAL.print(F("[TT] cells:"));
+        for (uint8_t c = 0; c < Turntable::CELL_COUNT; c++) {
+            DEBUG_SERIAL.print(F(" "));
+            DEBUG_SERIAL.print(c);
+            DEBUG_SERIAL.print(TurntableMotor.isOccupied(c) ? F("(X)") : F("(.)"));
+        }
+        DEBUG_SERIAL.println();
+        delay(1500);
+
+        // ---- 3) rotateToCell 最短路径 ----
+        DEBUG_SERIAL.print(F("[TT] rotateToCell(2), front="));
+        DEBUG_SERIAL.print(TurntableMotor.frontCell());
+        TurntableMotor.rotateToCell(2, 200);
+        while (!TurntableMotor.isDone()) { TurntableMotor.update(); }
+        DEBUG_SERIAL.print(F(" -> "));
+        DEBUG_SERIAL.println(TurntableMotor.frontCell());
 
         while (1) { delay(1000); }
     }
@@ -504,6 +564,205 @@ void loop() {
                 if (c == 'w' || c == 'W') {
                     DEBUG_SERIAL.println(F("[WB] Hold sensor over WHITE, measuring..."));
                     ColorSensors.beginWhiteBalance();
+                }
+            }
+        }
+    }
+
+    // ==================================================================
+    //  Stage 11: 转盘 + 颜色识别联动测试（任务1流程之一）
+    //  验证: 车头仓物块转 180° 到颜色识别模块处识别，记录颜色到该仓
+    //  操作: 先把一个已知颜色的物块放入车头开口仓位
+    //  指令: 'd' 识别车头仓（转180°→测量→记录）
+    //        's' 依次扫描所有已占用仓位并记录颜色
+    //        'w' 白平衡（传感器对准白色表面）
+    //        'p' 打印各仓位占用/颜色
+    //  注意: 识别前请先做白平衡('w')，否则阈值可能不准
+    // ==================================================================
+#elif DEBUG_STAGE == 11
+    {
+        DEBUG_SERIAL.println(F("\r\n========================================"));
+        DEBUG_SERIAL.println(F("  Stage 11: Turntable + Color Sensor"));
+        DEBUG_SERIAL.println(F("========================================"));
+        DEBUG_SERIAL.println(F("  [1] put a colored block in FRONT cell"));
+        DEBUG_SERIAL.println(F("  [CMD] 'd'=detect front cell (rotate 180deg)"));
+        DEBUG_SERIAL.println(F("        's'=scan all occupied cells"));
+        DEBUG_SERIAL.println(F("        'w'=white balance over WHITE"));
+        DEBUG_SERIAL.println(F("        'p'=print cell status"));
+        DEBUG_SERIAL.println(F("========================================\r\n"));
+
+        while (1) {
+            TurntableMotor.update();
+            ColorSensors.update();
+
+            if (DEBUG_SERIAL.available()) {
+                char c = (char)DEBUG_SERIAL.read();
+
+                if (c == 'd' || c == 'D') {
+                    // 车头仓 → 转180°到识别模块 → 识别 → 记录颜色到该仓
+                    uint8_t cell = TurntableMotor.frontCell();
+                    DEBUG_SERIAL.print(F("[T1] detect front cell "));
+                    DEBUG_SERIAL.println(cell);
+                    TurntableMotor.rotateToSensor(cell, 200);
+                    while (!TurntableMotor.isDone()) {
+                        TurntableMotor.update();
+                        ColorSensors.update();
+                    }
+
+                    ColorSensors.begin();
+                    unsigned long t0 = millis();
+                    while (!ColorSensors.available() && (millis() - t0) < 3000UL) {
+                        ColorSensors.update();
+                        TurntableMotor.update();
+                    }
+                    if (ColorSensors.available()) {
+                        uint8_t col = (uint8_t)ColorSensors.color();
+                        TurntableMotor.setCellColor(cell, col);
+                        DEBUG_SERIAL.print(F("[T1] cell "));
+                        DEBUG_SERIAL.print(cell);
+                        DEBUG_SERIAL.print(F(" color="));
+                        DEBUG_SERIAL.println(colorNameStr(col));
+                    } else {
+                        DEBUG_SERIAL.println(F("[T1] color measure timeout"));
+                    }
+                } else if (c == 's' || c == 'S') {
+                    // 依次扫描所有已占用仓位并记录颜色
+                    for (uint8_t cell = 0; cell < Turntable::CELL_COUNT; cell++) {
+                        if (!TurntableMotor.isOccupied(cell)) continue;
+                        TurntableMotor.rotateToSensor(cell, 200);
+                        while (!TurntableMotor.isDone()) {
+                            TurntableMotor.update();
+                            ColorSensors.update();
+                        }
+                        ColorSensors.begin();
+                        unsigned long t0 = millis();
+                        while (!ColorSensors.available() && (millis() - t0) < 3000UL) {
+                            ColorSensors.update();
+                            TurntableMotor.update();
+                        }
+                        if (ColorSensors.available()) {
+                            uint8_t col = (uint8_t)ColorSensors.color();
+                            TurntableMotor.setCellColor(cell, col);
+                            DEBUG_SERIAL.print(F("[T1] cell "));
+                            DEBUG_SERIAL.print(cell);
+                            DEBUG_SERIAL.print(F(" = "));
+                            DEBUG_SERIAL.println(colorNameStr(col));
+                        } else {
+                            DEBUG_SERIAL.print(F("[T1] cell "));
+                            DEBUG_SERIAL.print(cell);
+                            DEBUG_SERIAL.println(F(" timeout"));
+                        }
+                    }
+                    DEBUG_SERIAL.println(F("[T1] scan done"));
+                } else if (c == 'w' || c == 'W') {
+                    DEBUG_SERIAL.println(F("[WB] Hold sensor over WHITE, measuring..."));
+                    ColorSensors.beginWhiteBalance();
+                } else if (c == 'p' || c == 'P') {
+                    DEBUG_SERIAL.print(F("[TT] front="));
+                    DEBUG_SERIAL.print(TurntableMotor.frontCell());
+                    DEBUG_SERIAL.print(F(" cells:"));
+                    for (uint8_t cc = 0; cc < Turntable::CELL_COUNT; cc++) {
+                        DEBUG_SERIAL.print(F(" "));
+                        DEBUG_SERIAL.print(cc);
+                        DEBUG_SERIAL.print(TurntableMotor.isOccupied(cc)
+                            ? F(":") : F(":."));
+                        if (TurntableMotor.isOccupied(cc)) {
+                            DEBUG_SERIAL.print(colorNameStr(TurntableMotor.cellColor(cc)));
+                        }
+                    }
+                    DEBUG_SERIAL.println();
+                }
+            }
+        }
+    }
+
+    // ==================================================================
+    //  Stage 12: 任务流程分段测试（复用正式流程的同一套代码）
+    //  测试方法与正式流程完全相同——测试通过即证明完整流程对应部分可用
+    //  指令:
+    //    a = T2_LeaveHome()        b = T2_MoveToQRZone()
+    //    c = T2_MoveToPodium()     （自动注入方案1/仓位 A0 B1 C2）
+    //    d = T1_MoveToQRZone()     e = T1_PlaceAllBlocks()
+    //        （自动注入方案1/各仓颜色 黑白红绿蓝）
+    //    f = T1_ReturnHome()
+    //    g = 任务2连续收料阶段（真实状态机，收满3块+36°遮蔽后自动停）
+    //    h = 任务1连续收料阶段（真实状态机，收满5块后自动停）
+    //    i = 任务1逐仓颜色识别阶段（识别完自动停）
+    //    j = 任务1 36°遮蔽阶段（转完自动停）
+    //  阶段测试(g~j)期间请持续观察串口日志，阶段结束 _state 回 IDLE
+    // ==================================================================
+#elif DEBUG_STAGE == 12
+    {
+        DEBUG_SERIAL.println(F("\r\n========================================"));
+        DEBUG_SERIAL.println(F("  Stage 12: TaskFlow Segment Test"));
+        DEBUG_SERIAL.println(F("  Same code as formal flow (T2->T1)"));
+        DEBUG_SERIAL.println(F("========================================"));
+        DEBUG_SERIAL.println(F("  a=T2_LeaveHome   b=T2_MoveToQRZone"));
+        DEBUG_SERIAL.println(F("  c=T2_MoveToPodium(plan1,A0B1C2)"));
+        DEBUG_SERIAL.println(F("  d=T1_MoveToQRZone"));
+        DEBUG_SERIAL.println(F("  e=T1_PlaceAllBlocks(plan1,BWRGB)"));
+        DEBUG_SERIAL.println(F("  f=T1_ReturnHome"));
+        DEBUG_SERIAL.println(F("  g=T2 collect    h=T1 collect"));
+        DEBUG_SERIAL.println(F("  i=T1 detect     j=T1 shield36"));
+        DEBUG_SERIAL.println(F("========================================\r\n"));
+
+        while (1) {
+            // 驱动流程状态机: 阶段测试进行时推进；空闲时仅泵动各模块
+            TaskFlow_Update();
+
+            if (DEBUG_SERIAL.available()) {
+                char c = (char)DEBUG_SERIAL.read();
+                switch (c) {
+                case 'a':
+                    DEBUG_SERIAL.println(F("[TEST] T2_LeaveHome()"));
+                    T2_LeaveHome();
+                    break;
+                case 'b':
+                    DEBUG_SERIAL.println(F("[TEST] T2_MoveToQRZone()"));
+                    T2_MoveToQRZone();
+                    break;
+                case 'c':
+                    DEBUG_SERIAL.println(F("[TEST] T2_MoveToPodium() plan=1 cells A0 B1 C2"));
+                    TaskFlow_DebugSetT2Place(1, 0, 1, 2);   // 注入模拟数据
+                    T2_MoveToPodium(0);                     // 与正式流程同一函数
+                    break;
+                case 'd':
+                    DEBUG_SERIAL.println(F("[TEST] T1_MoveToQRZone()"));
+                    T1_MoveToQRZone();
+                    break;
+                case 'e': {
+                    uint8_t colors[5] = {
+                        ColorSensor::COLOR_BLACK, ColorSensor::COLOR_WHITE,
+                        ColorSensor::COLOR_RED,   ColorSensor::COLOR_GREEN,
+                        ColorSensor::COLOR_BLUE
+                    };
+                    DEBUG_SERIAL.println(F("[TEST] T1_PlaceAllBlocks() plan=1 cells=黑白红绿蓝"));
+                    TaskFlow_DebugSetT1Place(1, colors);    // 注入模拟数据
+                    T1_PlaceAllBlocks();                    // 与正式流程同一函数
+                    break;
+                }
+                case 'f':
+                    DEBUG_SERIAL.println(F("[TEST] T1_ReturnHome()"));
+                    T1_ReturnHome();
+                    break;
+                case 'g':
+                    DEBUG_SERIAL.println(F("[TEST] T2 collect phase start (plan=1)"));
+                    TaskFlow_DebugRunCollectT2(1);
+                    break;
+                case 'h':
+                    DEBUG_SERIAL.println(F("[TEST] T1 collect phase start (plan=1)"));
+                    TaskFlow_DebugRunCollectT1(1);
+                    break;
+                case 'i':
+                    DEBUG_SERIAL.println(F("[TEST] T1 detect phase start"));
+                    TaskFlow_DebugRunDetectT1();
+                    break;
+                case 'j':
+                    DEBUG_SERIAL.println(F("[TEST] T1 shield(36deg) phase start"));
+                    TaskFlow_DebugRunShieldT1();
+                    break;
+                default:
+                    break;
                 }
             }
         }

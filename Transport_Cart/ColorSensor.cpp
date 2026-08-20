@@ -110,11 +110,10 @@ void ColorSensor::_finish() {
 // 顺序重要: 先判白/黑，再按通道优势判蓝/绿/红
 ColorSensor::Color ColorSensor::_classify(float r, float g, float b) const {
     if (r > 200.0f && g > 200.0f && b > 200.0f) return COLOR_WHITE;  // 白
-    if (r < 36.0f && g < 36.0f && b < 36.0f)     return COLOR_BLACK;  // 黑
     if (b > r + 10.0f && b > g + 10.0f)          return COLOR_BLUE;   // 蓝
     if (g > b + 2.0f && g > r + 2.0f)            return COLOR_GREEN;  // 绿
     if (r > g + 20.0f && r > b + 20.0f)          return COLOR_RED;    // 红
-    return COLOR_NONE;
+    return COLOR_BLACK;  // 未知 → 强制回退到黑，避免返回 COLOR_NONE
 }
 
 // S2/S3 通道选择: (S2,S3)

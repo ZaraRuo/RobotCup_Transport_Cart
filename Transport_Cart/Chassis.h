@@ -65,6 +65,13 @@ public:
     // 后向循迹: 基于后4路传感器
     bool trackBackward(long steps, unsigned long baseUs);
 
+    // 前向循迹（按毫米）: 自动换算 steps = mm × WHEEL_STEPS_PER_MM
+    // 推荐用于定距循迹（如收料点间隔、目标点距离）
+    bool trackForwardMm(float mm, unsigned long baseUs);
+
+    // 后向循迹（按毫米）: 自动换算步数
+    bool trackBackwardMm(float mm, unsigned long baseUs);
+
     // 前向圆弧循迹: 基于前8路传感器，维持恒定内外轮速差
     // clockwise: true=顺时针, false=逆时针
     // innerUs: 内侧轮每步间隔; outerUs: 外侧轮每步间隔

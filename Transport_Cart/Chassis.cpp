@@ -213,6 +213,20 @@ bool Chassis::trackBackward(long steps, unsigned long baseUs) {
     return trackForward(-steps, baseUs);
 }
 
+// 前向循迹（按毫米）: 自动换算 mm → 步数后循迹
+bool Chassis::trackForwardMm(float mm, unsigned long baseUs) {
+    if (mm < 0) return false;
+    long steps = (long)(mm * WHEEL_STEPS_PER_MM);   // 每毫米 ≈ 29.10 步
+    return trackForward(steps, baseUs);
+}
+
+// 后向循迹（按毫米）: 自动换算 mm → 步数后循迹
+bool Chassis::trackBackwardMm(float mm, unsigned long baseUs) {
+    if (mm < 0) return false;
+    long steps = (long)(mm * WHEEL_STEPS_PER_MM);   // 每毫米 ≈ 29.10 步
+    return trackBackward(steps, baseUs);
+}
+
 // 前向圆弧循迹: 基于前侧8路传感器，维持恒定内外轮速差
 // clockwise=true:  顺时针圆弧，左轮外侧(快) / 右轮内侧(慢)
 // clockwise=false: 逆时针圆弧，右轮外侧(快) / 左轮内侧(慢)
