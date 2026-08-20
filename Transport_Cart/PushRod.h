@@ -1,11 +1,11 @@
 // 电动伸缩推杆驱动模块 (L298N H桥)
-// 对外只提供 2 个运动接口：
-//   extendToTop()     伸到顶：持续伸出 PUSH_ROD_TRAVEL_MS (10s) 后自动停止
-//   retractToBottom() 伸到底：持续缩回 PUSH_ROD_TRAVEL_MS (10s) 后自动停止
+// 对外提供 2 个运动接口，时长由调用者输入（毫秒）：
+//   extendToTop(ms)     伸出 ms 毫秒后自动停止
+//   retractToBottom(ms) 缩回 ms 毫秒后自动停止
 // 说明:
-//   - 推杆无位置/行程反馈，靠固定运行时间覆盖全程，时间在 Config.h 中调整
+//   - 推杆无位置/行程反馈，靠运行时间控制行程，时长由调用处指定
 //   - 若电机中途先顶到机械限位，剩余时间会堵转顶住限位，属预期行为，
-//     请保证 PUSH_ROD_TRAVEL_MS ≥ 实际全程用时
+//     请保证输入时长 ≥ 实际所需用时
 //   - 两个运动接口均为阻塞实现（内部 delay），调用期间主循环暂停，
 //     适合"机器人停稳后推放货物"的场景
 
@@ -22,11 +22,11 @@ public:
     // 初始化引脚并置为停止状态
     void init();
 
-    // 伸到顶（运行 10s 后自动停止，阻塞）
-    void extendToTop();
+    // 伸出：运行 ms 毫秒后自动停止（阻塞）
+    void extendToTop(unsigned long ms);
 
-    // 伸到底（运行 10s 后自动停止，阻塞）
-    void retractToBottom();
+    // 缩回：运行 ms 毫秒后自动停止（阻塞）
+    void retractToBottom(unsigned long ms);
 
 private:
     // 按方向运行指定时长后停止（阻塞）

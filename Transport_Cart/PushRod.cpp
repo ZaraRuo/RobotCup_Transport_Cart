@@ -1,5 +1,5 @@
 // 电动伸缩推杆驱动模块 (L298N H桥)
-// 对外接口: extendToTop() / retractToBottom()，每次运动固定 10s 后自动停止
+// 对外接口: extendToTop(ms) / retractToBottom(ms)，时长由调用者输入
 // IN1/IN2: 方向控制, ENA: 全速使能 (HIGH)
 // IN1=HIGH IN2=LOW → 伸出
 // IN1=LOW  IN2=HIGH → 缩回
@@ -22,14 +22,14 @@ void PushRod::init() {
     digitalWrite(PUSH_ROD_ENA_PIN, HIGH);   // 全速使能
 }
 
-// 伸到顶: 持续伸出 PUSH_ROD_TRAVEL_MS 后自动停止
-void PushRod::extendToTop() {
-    _run(true, PUSH_ROD_TRAVEL_MS);
+// 伸出: 运行 ms 毫秒后自动停止（阻塞）
+void PushRod::extendToTop(unsigned long ms) {
+    _run(true, ms);
 }
 
-// 伸到底: 持续缩回 PUSH_ROD_TRAVEL_MS 后自动停止
-void PushRod::retractToBottom() {
-    _run(false, PUSH_ROD_TRAVEL_MS);
+// 缩回: 运行 ms 毫秒后自动停止（阻塞）
+void PushRod::retractToBottom(unsigned long ms) {
+    _run(false, ms);
 }
 
 // 阻塞运行指定时长后停止

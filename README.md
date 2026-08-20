@@ -11,7 +11,7 @@
 | 步进电机 + 驱动器 | 1 | 转盘旋转（72°/144°/216°） |
 | 灰度循迹传感器 | 12路 | 前8路 + 后4路，黑线检测 |
 | 二维码扫描模块 | 1 | 扫码成功自动串口输出（内容ASCII+CR） |
-| 电动推杆 + L298N | 1 | 货物推放（单程 10s 全程） |
+| 电动推杆 + L298N | 1 | 货物推放（伸/缩时长输入） |
 | 颜色传感器 | 1 | TCS230（8针），物料五色识别 |
 
 ## 引脚分配
@@ -76,7 +76,7 @@
 | LOW | HIGH | 缩回 |
 | LOW | LOW | 停止 |
 
-- 行程控制：推杆无位置反馈，`extendToTop()` / `retractToBottom()` 各运行 `PUSH_ROD_TRAVEL_MS`（10s）后自动停止。
+- 行程控制：推杆无位置反馈，`extendToTop(ms)` / `retractToBottom(ms)` 按调用处输入的时长(ms)运行后自动停止。
 
 ### 4. 二维码扫描模块（ADL615H）
 
@@ -132,7 +132,7 @@ Transport_Cart.ino         — 主入口 + 分阶段调试 + 正常模式
 ├── Stepper.h/cpp          — 步进电机非阻塞驱动
 ├── LineSensor.h/cpp       — 12路灰度传感器 + 加权质心偏移量
 ├── Chassis.h/cpp          — 底盘状态机（直行/旋转/循迹）
-├── PushRod.h/cpp          — 电动推杆（L298N，伸到顶/伸到底 10s）
+├── PushRod.h/cpp          — 电动推杆（L298N，伸/缩时长输入）
 ├── QRScanner.h/cpp        — 二维码扫描（Serial3 自动输出，CR分帧解析）
 ├── Turntable.h/cpp        — 转盘步进电机（72°旋转 + 5仓位管理 + 颜色识别定位）
 ├── ColorSensor.h/cpp      — TCS230 颜色识别（中断计数，非阻塞）

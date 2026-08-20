@@ -65,8 +65,9 @@ bool Stepper::runTo(long target) {
 
 // 重载版本: 同时设置目标步数和每步间隔时间
 // stepIntervalUs 越小转速越快，最小不低于 STEPPER_MIN_STEP_TIME (80us)
+// SPEED_BOOST: 全局速度倍率，间隔减半 → 速度翻倍（覆盖所有运动，含循迹修正）
 bool Stepper::runTo(long target, unsigned long stepIntervalUs) {
-    _stepIntervalUs = stepIntervalUs;
+    _stepIntervalUs = max(STEPPER_MIN_STEP_TIME, stepIntervalUs / SPEED_BOOST);
     return runTo(target);
 }
 
@@ -75,7 +76,8 @@ bool Stepper::runTo(long target, unsigned long stepIntervalUs) {
 // 需在 loop() 中反复调用以维持旋转
 void Stepper::runCycle(bool dir, unsigned long stepIntervalUs) {
     if (_stopped) return;
-    _stepIntervalUs = stepIntervalUs;
+    // SPEED_BOOST: 全局速度倍率，间隔减半 → 速度翻倍（覆盖循迹/持续旋转）
+    _stepIntervalUs = max(STEPPER_MIN_STEP_TIME, stepIntervalUs / SPEED_BOOST);
     if (_canStep()) {
         _pulse(dir);
     }

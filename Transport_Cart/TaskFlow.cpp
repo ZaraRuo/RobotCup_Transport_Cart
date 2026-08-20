@@ -10,9 +10,10 @@
 //
 // ============================================================================
 // 摆放机制与规则（已由用户确认，勿违背）:
-//   1) 推杆的作用是【抬升转盘】，用于适配颁奖台高度：
-//      冠军台高36mm、亚军台高18mm → 需伸长推杆抬升转盘；
-//      季军台贴地(0mm) → 不需要推杆。
+//   ★ 推杆方向（重要，勿再弄反）: 推杆【伸长】才是放下转盘，推杆【收缩】才是抬高转盘。
+//   1) 推杆的作用是【抬高/放下转盘】，用于适配颁奖台高度：
+//      冠军台高36mm、亚军台高18mm → 需【收缩推杆=抬高转盘】；
+//      季军台贴地(0mm) → 转盘保持放下，不需要抬高推杆。
 //   2) 放料动作本身 = 车辆前进到目标 → 物块所在仓位转到车头开口 →
 //      车辆后退 → 物块留下（车头"罩"从物块上滑脱）。推杆不是放料动作。
 //   3) 任务2摆放（固定，与方案无关）: A→冠军台, B→亚军台, C→季军台；
@@ -46,6 +47,11 @@
 #define COL_RED   3    // 红
 #define COL_BLACK 4    // 黑
 #define COL_BLUE  5    // 蓝
+
+// 运动等待时"时间片泵动"时长 (us)
+// 高频调用 update() 保证步进按目标间隔走、循迹左右轮速度差修正生效；
+// 若每圈只 update 一次，转速会被循环周期拖慢且循迹只走直线（不走弯）。
+#define TASKFLOW_PUMP_US   3000UL
 
 // 颁奖台: 0=冠军台, 1=亚军台, 2=季军台（规则: A→冠军 B→亚军 C→季军）
 // 任务1目标区: A=0, B=1, C=2, D=3, E=4
@@ -130,6 +136,8 @@ static uint8_t _cellOfBlock[3];          // 任务2各物块收进转盘时所�
 static uint8_t _t1Plan = 0;              // 任务1方案号(0~15) = 扫码值-1
 static uint8_t _collectIdx = 0;          // 任务1已收物块计数(0~4)
 static uint8_t _detectIdx = 0;           // 任务1正在识别的仓号(0~4)
+static uint8_t _detectRetry = 0;         // 当前仓颜色识别重试次数(最多2次)
+static bool _cellOk[5] = {false, false, false, false, false}; // 各仓是否识别成功(可摆放)
 
 // —— 通用 ——
 static unsigned long _scanStartMs = 0;   // 扫码开始时刻（用于10s超时）
@@ -139,13 +147,29 @@ static bool _finalHalf = false;          // 收料结束后 36° 遮蔽旋转是
 static TaskStep _debugStopAfter = STEP_DONE; // 调试: 阶段运行到此步骤即停止
 
 // ============================================================================
-// 五、摆放配合辅助函数（供用户动作函数调用，无需修改）
+// 五、等待辅助 + 摆放配合辅助函数（供用户动作函数调用，无需修改）
 // ============================================================================
+
+// 时间片泵动等待底盘完成（保证循迹修正与速度准确）
+static void _waitCartDone() {
+    while (!Cart.isDone()) {
+        unsigned long t0 = micros();
+        do { Cart.update(); } while (!Cart.isDone() && (micros() - t0) < TASKFLOW_PUMP_US);
+    }
+}
+
+// 时间片泵动等待转盘旋转完成
+static void _waitTurntableDone() {
+    while (!TurntableMotor.isDone()) {
+        unsigned long t0 = micros();
+        do { TurntableMotor.update(); } while (!TurntableMotor.isDone() && (micros() - t0) < TASKFLOW_PUMP_US);
+    }
+}
 
 // 把指定物块(A/B/C)所在仓转到车头开口（放料位），等待转盘到位（任务2用）
 static void _alignBlockCell(uint8_t block) {
     TurntableMotor.rotateToCell(_cellOfBlock[block], 200); // 该仓转到车头开口
-    while (!TurntableMotor.isDone()) { TurntableMotor.update(); } // 等转完
+    _waitTurntableDone();                                 // 等转完（时间片泵动）
 }
 
 // 查找装有指定颜色的仓号（任务1颜色识别阶段已用 setCellColor 记录）
@@ -156,11 +180,13 @@ static uint8_t _findCellByColor(uint8_t color) {
     return 0;                          // 找不到 → 默认0号仓
 }
 
-// 把装有指定颜色的物块仓转到车头开口（放料位），等待转盘到位（任务1用）
-static void _alignColorCell(uint8_t color) {
+// 把装有指定颜色的物块仓转到车头开口（放料位）；返回是否可放（该仓识别成功）
+static bool _alignColorCell(uint8_t color) {
     uint8_t cell = _findCellByColor(color);        // 定位该颜色物块的仓号
+    if (!_cellOk[cell]) return false;              // 该仓识别失败 → 跳过不放
     TurntableMotor.rotateToCell(cell, 200);        // 该仓转到车头开口
-    while (!TurntableMotor.isDone()) { TurntableMotor.update(); } // 等转完
+    _waitTurntableDone();                          // 等转完（时间片泵动）
+    return true;
 }
 
 // ============================================================================
@@ -169,7 +195,7 @@ static void _alignColorCell(uint8_t color) {
 //   以下 6 个函数由你按实测填写。
 //   约定: 这些函数是【阻塞式】的——必须"启动运动并等它做完"再返回：
 //       Cart.moveMm(300, 160);                     // 启动: 前进300mm
-//       while (!Cart.isDone()) { Cart.update(); }  // 等待走完
+//       _waitCartDone();  // 等待走完
 //   可用接口: Cart.moveMm / rotateAngle / trackForwardMm / trackBackwardMm
 //            （定距循迹，单位mm）/ trackArc*；速度 stepUs 用 160~240 较稳。
 // ============================================================================
@@ -182,18 +208,18 @@ static void _alignColorCell(uint8_t color) {
 void T2_LeaveHome() {
     // 先定距前进
     Cart.moveMm(333.0f, 800);  // 前进 333mm，每步间隔 800us
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 再右转 90°
     Cart.rotateAngle(-90.0f, 800);  // 右转 90°（负值=顺时针）
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
 }
 
 // 【任务2-2】去右二维码区：停到二维码正前方，让扫码模块能扫到
 void T2_MoveToQRZone() {
     // 循迹前进至右二维码区（定距循迹，单位 mm）
-    Cart.trackForwardMm(537.4f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    Cart.trackForwardMm(437.5f, 800);
+    _waitCartDone();
 }
 
 // 【任务2-3】摆放全部 3 个物块到颁奖台（完整流程）
@@ -202,111 +228,112 @@ void T2_MoveToPodium(uint8_t podium) {
     // ========== 初始定位 ==========
     // 左转90度
     Cart.rotateAngle(90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距直行（到内圈）
     Cart.moveMm(400.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 右转90度
     Cart.rotateAngle(-90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距循迹前进
     Cart.trackForwardMm(909.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 右转90度
     Cart.rotateAngle(-90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
-    // ========== 放第1块（亚军台 = B 块） ==========
-    // 推杆缩回: 转盘落地（放料准备）
-    Rod.retractToBottom();
-    
+    // ========== 放第1块（亚军台 = B 块，台高18mm） ==========
     // 定距直行（到亚军台）
     Cart.moveMm(247.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 把 B 物块所在仓转到车头开口（放料位）
     _alignBlockCell(BLK_B);
     
-    // 伸长推杆 = 抬升转盘，适配亚军台(18mm)高度
-    Rod.extendToTop();
+    // 收缩推杆 5s = 抬高转盘，物块升到亚军台(18mm)高度
+    Rod.retractToBottom(5000UL);
     
     // 定距后退 = 放料（车头"罩"滑脱，物块留在亚军台）
     Cart.moveMm(-247.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
-    // ========== 放第2块（冠军台 = A 块） ==========
+    // 伸长推杆 5s = 放下转盘回地面
+    Rod.extendToTop(5000UL);
+    
+    // ========== 放第2块（冠军台 = A 块，台高36mm） ==========
     // 左转90度
     Cart.rotateAngle(90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距循迹前进
     Cart.trackForwardMm(269.6f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 右转90度
     Cart.rotateAngle(-90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
-    
-    // 推杆缩回: 转盘落地（放料准备）
-    Rod.retractToBottom();
+    _waitCartDone();
     
     // 定距直行（到冠军台）
     Cart.moveMm(247.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 把 A 物块所在仓转到车头开口（放料位）
     _alignBlockCell(BLK_A);
     
-    // 伸长推杆 = 抬升转盘，适配冠军台(36mm)高度
-    Rod.extendToTop();
+    // 收缩推杆 15s = 抬高转盘，物块升到冠军台(36mm)高度
+    Rod.retractToBottom(15000UL);
     
     // 定距后退 = 放料（物块留在冠军台）
     Cart.moveMm(-247.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
-    // ========== 放第3块（季军台 = C 块，贴地无高度，不需推杆） ==========
+    // 伸长推杆 20s = 放下转盘回地面
+    Rod.extendToTop(20000UL);
+    
+    // ========== 放第3块（季军台 = C 块，贴地0mm，转盘保持放下，不需推杆） ==========
     // 左转90度
     Cart.rotateAngle(90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距循迹前进
     Cart.trackForwardMm(270.2f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 右转90度
     Cart.rotateAngle(-90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距直行（到季军台）
     Cart.moveMm(247.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 把 C 物块所在仓转到车头开口（放料位）
     _alignBlockCell(BLK_C);
     
-    // 季军台贴地，不需抬升推杆，直接后退放料
+    // 季军台贴地，转盘已放下，直接后退放料
     // 定距后退 = 放料（物块留在季军台）
-    Cart.moveMm(-1677.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    Cart.moveMm(-1777.0f, 800);
+    _waitCartDone();
 }
 
 // ---------------------------------------------------------------
 // 任务1 运动原语
 // ---------------------------------------------------------------
 
-// 【任务1-1】去左二维码区：停到二维码正前方，让扫码模块能扫到
+// 【任务1-1】去左二维码区：扫码装置在车辆右侧，
+//   右转90° → 循迹后退235.6mm 使右侧扫码模块对准二维码
 void T1_MoveToQRZone() {
-    // 左转90度
-    Cart.rotateAngle(90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    // 向右转90度（扫码装置在车右侧）
+    Cart.rotateAngle(-90.0f, 800);
+    _waitCartDone();
     
-    // 定距循迹前进
-    Cart.trackForwardMm(235.6f, 800);  // 占位值，需实测
-    while (!Cart.isDone()) { Cart.update(); }
+    // 定距循迹后退（使车右侧扫码模块对准二维码）
+    Cart.trackBackwardMm(385.6f, 800);  // 占位值，需实测
+    _waitCartDone();
 }
 
 // 【任务1-2】摆放全部 5 个物块到目标位置（完整流程）
@@ -316,158 +343,168 @@ void T1_PlaceAllBlocks() {
     // ========== 初始定位 ==========
     // 右转90度
     Cart.rotateAngle(-90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距直行（到内圈）
     Cart.moveMm(400.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 左转90度
     Cart.rotateAngle(90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距循迹前进
     Cart.trackForwardMm(273.3f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距直线倒车
     Cart.moveMm(-56.4f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // ========== 放 A 块（位置A；方案中A位=T1_PLAN[plan][0]） ==========
     // 右转90度
     Cart.rotateAngle(-90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距直行（到A）
     Cart.moveMm(63.7f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 把"位置A应放颜色"的物块所在仓转到车头开口（放料位）
-    _alignColorCell(T1_PLAN[_t1Plan][0]);
-    
-    // 定距后退 = 放料（车头"罩"滑脱，物块留在A）
-    Cart.moveMm(-63.7f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    if (_alignColorCell(T1_PLAN[_t1Plan][0])) {
+        // 定距后退 = 放料（车头"罩"滑脱，物块留在A）
+        Cart.moveMm(-63.7f, 800);
+        _waitCartDone();
+    } else {
+        DEBUG_SERIAL.println(F("[T1] skip A (cell invalid)")); // 识别失败，跳过
+    }
     
     // 左转90度
     Cart.rotateAngle(90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距循迹前进
     Cart.trackForwardMm(852.4f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // ========== 放 C 块（位置C；方案中C位=T1_PLAN[plan][2]） ==========
     // 右转90度
     Cart.rotateAngle(-90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距直行（到C）
     Cart.moveMm(66.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 把"位置C应放颜色"的物块所在仓转到车头开口（放料位）
-    _alignColorCell(T1_PLAN[_t1Plan][2]);
-    
-    // 定距后退 = 放料（物块留在C）
-    Cart.moveMm(-66.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    if (_alignColorCell(T1_PLAN[_t1Plan][2])) {
+        // 定距后退 = 放料（物块留在C）
+        Cart.moveMm(-66.0f, 800);
+        _waitCartDone();
+    } else {
+        DEBUG_SERIAL.println(F("[T1] skip C (cell invalid)"));
+    }
     
     // 左转90度
     Cart.rotateAngle(90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距循迹前进
     Cart.trackForwardMm(1980.8f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距直线倒车
     Cart.moveMm(-223.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // ========== 放 E 块（位置E；方案中E位=T1_PLAN[plan][4]） ==========
     // 右转90度
     Cart.rotateAngle(-90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距直行（到E）
     Cart.moveMm(167.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 把"位置E应放颜色"的物块所在仓转到车头开口（放料位）
-    _alignColorCell(T1_PLAN[_t1Plan][4]);
-    
-    // 定距后退 = 放料（物块留在E）
-    Cart.moveMm(-176.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    if (_alignColorCell(T1_PLAN[_t1Plan][4])) {
+        // 定距后退 = 放料（物块留在E）
+        Cart.moveMm(-176.0f, 800);
+        _waitCartDone();
+    } else {
+        DEBUG_SERIAL.println(F("[T1] skip E (cell invalid)"));
+    }
     
     // 左转90度
     Cart.rotateAngle(90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距循迹前进
     Cart.trackForwardMm(503.3f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // ========== 放 D 块（位置D；方案中D位=T1_PLAN[plan][3]） ==========
     // 右转90度
     Cart.rotateAngle(-90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距直行（到D）
     Cart.moveMm(107.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 把"位置D应放颜色"的物块所在仓转到车头开口（放料位）
-    _alignColorCell(T1_PLAN[_t1Plan][3]);
-    
-    // 定距后退 = 放料（物块留在D）
-    Cart.moveMm(-107.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    if (_alignColorCell(T1_PLAN[_t1Plan][3])) {
+        // 定距后退 = 放料（物块留在D）
+        Cart.moveMm(-107.0f, 800);
+        _waitCartDone();
+    } else {
+        DEBUG_SERIAL.println(F("[T1] skip D (cell invalid)"));
+    }
     
     // 左转90度
     Cart.rotateAngle(90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距循迹前进
     Cart.trackForwardMm(760.5f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // ========== 放 B 块（位置B；方案中B位=T1_PLAN[plan][1]） ==========
     // 右转90度
     Cart.rotateAngle(-90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距直行（到B）
     Cart.moveMm(106.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 把"位置B应放颜色"的物块所在仓转到车头开口（放料位）
-    _alignColorCell(T1_PLAN[_t1Plan][1]);
-    
-    // 定距后退 = 放料（物块留在B）
-    Cart.moveMm(-106.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    if (_alignColorCell(T1_PLAN[_t1Plan][1])) {
+        // 定距后退 = 放料（物块留在B）
+        Cart.moveMm(-106.0f, 800);
+        _waitCartDone();
+    } else {
+        DEBUG_SERIAL.println(F("[T1] skip B (cell invalid)"));
+    }
 }
 
 // 【任务1-3】返回 HOME：全部轮子进入 HOME 区并停稳
 void T1_ReturnHome() {
     // 右转90度
     Cart.rotateAngle(-90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距循迹前进
     Cart.trackForwardMm(425.9f, 800);  // 占位值，需实测
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 右转90度
     Cart.rotateAngle(-90.0f, 800);
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
     
     // 定距直行
     Cart.moveMm(487.8f, 800);  // 占位值，需实测
-    while (!Cart.isDone()) { Cart.update(); }
+    _waitCartDone();
 }
 
 // ============================================================================
@@ -500,6 +537,7 @@ void TaskFlow_Init() {
     _pickIdx = 0;                     // 拾取计数清零（从点3开始收）
     _collectIdx = 0;                  // 清空任务1收料计数
     _detectIdx = 0;                   // 清空识别仓号
+    for (uint8_t i = 0; i < 5; i++) { _cellOk[i] = false; } // 清空识别成功标记
     _busy = false;                    // 无进行中的动作
     _finalHalf = false;               // 收料结束36°旋转标记清零
     _debugStopAfter = STEP_DONE;      // 正常模式: 无阶段停止点
@@ -508,10 +546,21 @@ void TaskFlow_Init() {
 // 状态机主循环: 正常模式下 loop() 只调本函数，所以先泵动各硬件模块
 void TaskFlow_Update() {
     // 泵动各模块（不调 update 的话，底盘/转盘/扫码/颜色都不会动）
-    Cart.update();                    // 底盘状态机推进
     Scanner.update();                 // 二维码收包解析
-    TurntableMotor.update();          // 转盘旋转推进（完成后自动更新仓位）
     ColorSensors.update();            // 颜色测量状态机推进
+
+    // 底盘/转盘有运动时，在时间片内高频泵动；都停着时只各调一次
+    if (!Cart.isDone() || !TurntableMotor.isDone()) {
+        unsigned long pumpT0 = micros();
+        do {
+            Cart.update();            // 底盘状态机推进
+            TurntableMotor.update();  // 转盘旋转推进（完成后自动更新仓位）
+        } while ((micros() - pumpT0) < TASKFLOW_PUMP_US &&
+                 (!Cart.isDone() || !TurntableMotor.isDone()));
+    } else {
+        Cart.update();
+        TurntableMotor.update();
+    }
 
     if (_state != TF_RUNNING) return; // 流程未运行(空闲/已完成)则什么都不做
 
@@ -534,11 +583,11 @@ void TaskFlow_Update() {
 
     case STEP_T2_TO_QR:
         T2_MoveToQRZone();            // 【用户动作】移到右二维码区
-        _step = STEP_T2_SCAN;         // 下一步: 扫码
-        _scanStartMs = millis();      // 记下开始等待的时刻
+        Scanner.flush();              // 清缓冲，避免旧数据残留
+        _step = STEP_T2_SCAN;         // 下一步: 扫码（一直等，直到成功）
         break;
 
-    // ---- 扫码: 等结果(1~6)，非法/超时10s → 回定位重扫 ----
+    // ---- 扫码: 无限等待，直到扫到合法方案(1~6)，不再超时或重定位 ----
     case STEP_T2_SCAN: {
         if (Scanner.available()) {     // 收到一帧扫码结果?
             int n = Scanner.result();  // 取出二维码数字
@@ -548,28 +597,20 @@ void TaskFlow_Update() {
                 DEBUG_SERIAL.print(F("[T2] plan #")); // 日志: 方案号
                 DEBUG_SERIAL.println(n);
                 _step = STEP_T2_TRACK_COLLECT; // 下一步: 开始收料
-            } else {                   // 扫到非法数字
-                DEBUG_SERIAL.print(F("[T2] invalid scan=")); // 日志
-                DEBUG_SERIAL.println(n);
-                _step = STEP_T2_TO_QR; // 回去重新定位再扫
             }
-        } else if (millis() - _scanStartMs > 10000UL) { // 超过10秒没扫到
-            DEBUG_SERIAL.println(F("[T2] scan timeout, re-position")); // 日志
-            _step = STEP_T2_TO_QR;     // 回去重新定位再扫
+            // 非法值忽略，继续等下一帧（不做任何动作，不移动）
         }
         break;
     }
 
     // ---- 收料: 持续循迹不停车，到达拾取点时记录并收格 ----
-    //   收格旋转只需前 ROTATE_AT 个拾取点触发（最后一块进仓后不转72°）；
-    //   循迹走完总里程后，再转 36°（半格），使物块不暴露在车头开口处。
+    //   触发收格的里程碑只保留前2个；第3块在循迹总里程处收入；
+    //   走完总里程后记录第3块并转 36°（半格）遮蔽车头开口。
     case STEP_T2_TRACK_COLLECT: {
-        // 3个拾取点位置，单位 mm（占位值，需实测）
-        static const float milestoneMM[3] = { 979.3f, 1390.0f, 1816.5f };
-        // 总循迹距离，单位 mm（覆盖3个取料点，占位值）
-        static const float totalMM = 1816.5f;
-        // 需要转72°收格的拾取点个数（只前2个；第3块进仓后不转）
-        static const uint8_t ROTATE_AT = 2;
+        // 触发转盘收格的拾取点（只前2个），单位 mm（占位值，需实测）
+        static const float milestoneMM[2] = { 1120.3f, 1540.0f };
+        // 总循迹距离（= 第3块所在位置），单位 mm（占位值，需实测）
+        static const float totalMM = 2254.5f;
 
         if (!_busy) {
             // 首次进入: 启动持续循迹（不停车）
@@ -579,36 +620,40 @@ void TaskFlow_Update() {
             _finalHalf = false;
             _busy = true;
         } else {
-            // 到达当前拾取点（左右轮【都】达到才触发），物块已进入车头仓
-            if (_pickIdx < 3 && TurntableMotor.isDone() &&
+            // 前2个拾取点: 物块进车头仓 → 记录 → 转72°腾出下一空仓
+            if (_pickIdx < 2 && TurntableMotor.isDone() &&
                 (MotorL.currentStep() >= (long)(milestoneMM[_pickIdx] * WHEEL_STEPS_PER_MM) &&
                  MotorR.currentStep() >= (long)(milestoneMM[_pickIdx] * WHEEL_STEPS_PER_MM))) {
-                uint8_t point = 2 - _pickIdx;             // 当前摆放点(0=点1,1=点2,2=点3)
+                uint8_t point = 2 - _pickIdx;             // 拾取顺序: 点3, 点2
                 uint8_t blk = T2_PLAN[_plan][point];      // 查表: 该点摆的是哪个物块
                 TurntableMotor.occupyFront();             // 标记车头仓已占用
                 _cellOfBlock[blk] = TurntableMotor.frontCell(); // 记录仓号
+                TurntableMotor.rotateMultiples(1, 200);   // 转72°，下一空仓到车头
                 DEBUG_SERIAL.print(F("[T2] block collected at point "));
                 DEBUG_SERIAL.println(point);
-                // 前 ROTATE_AT 个拾取点收完后转72°腾出下一空仓；最后一个不转
-                if (_pickIdx < ROTATE_AT) {
-                    TurntableMotor.rotateMultiples(1, 200);
-                }
                 _pickIdx++;
             }
-            // 循迹完成且3块都收完 → 先转36°遮蔽开口，再进入摆放
-            if (Cart.isDone() && _pickIdx >= 3) {
-                if (!_finalHalf) {
-                    // 转 36°（半格）: 让物块不直接暴露在车头开口处
-                    DEBUG_SERIAL.println(F("[T2] final rotate 36deg"));
-                    TurntableMotor.rotateDegrees(36.0f, 200);
-                    _finalHalf = true;
-                } else if (TurntableMotor.isDone()) {
-                    // 36° 转完 → 进入摆放阶段
-                    DEBUG_SERIAL.println(F("[T2] 3 blocks collected, start placing"));
-                    _busy = false;
-                    _block = BLK_A;
-                    _step = STEP_T2_TO_PODIUM;
-                }
+            // 循迹走完总里程: 第3块(点1)已进入车头仓 → 记录 + 转36°遮蔽，进入摆放
+            if (Cart.isDone() && _pickIdx == 2 && !_finalHalf) {
+                uint8_t point = 2 - _pickIdx;         // = 0 → 点1
+                uint8_t blk = T2_PLAN[_plan][point];  // 该点是哪个物块
+                TurntableMotor.occupyFront();         // 第3块进车头仓
+                _cellOfBlock[blk] = TurntableMotor.frontCell();
+                _pickIdx++;                           // 3块全部记录
+                // 转 36°（半格）: 使物块不直接暴露在车头开口处
+                DEBUG_SERIAL.println(F("[T2] final rotate 36deg"));
+                TurntableMotor.rotateDegrees(36.0f, 200);
+                _finalHalf = true;
+            }
+            // 36° 转完后，3块齐备 → 收缩推杆5s（抬高转盘，物块随内限位抬起便于转运），再进入摆放
+            if (_finalHalf && TurntableMotor.isDone() && _pickIdx == 3) {
+                // 收缩推杆 5s = 抬高转盘
+                DEBUG_SERIAL.println(F("[T2] retract rod 5s (raise)"));
+                Rod.retractToBottom(5000UL);
+                DEBUG_SERIAL.println(F("[T2] 3 blocks collected, start placing"));
+                _busy = false;
+                _block = BLK_A;
+                _step = STEP_T2_TO_PODIUM;
             }
         }
         break;
@@ -630,11 +675,11 @@ void TaskFlow_Update() {
     // ---- 去左二维码区（任务2完成后直接进入，无需出HOME） ----
     case STEP_T1_TO_QR:
         T1_MoveToQRZone();            // 【用户动作】移到左二维码区
-        _step = STEP_T1_SCAN;         // 下一步: 扫码
-        _scanStartMs = millis();      // 记下开始等待的时刻（超时用）
+        Scanner.flush();              // 清缓冲，避免旧数据残留
+        _step = STEP_T1_SCAN;         // 下一步: 扫码（一直等，直到成功）
         break;
 
-    // ---- 扫码: 等结果(1~16)，非法/超时10s → 回定位重扫 ----
+    // ---- 扫码: 无限等待，直到扫到合法方案(1~16)，不再超时或重定位 ----
     case STEP_T1_SCAN: {
         if (Scanner.available()) {     // 收到一帧扫码结果?
             int n = Scanner.result();  // 取出二维码数字
@@ -643,29 +688,24 @@ void TaskFlow_Update() {
                 _collectIdx = 0;       // 收料计数清零，准备收第1块
                 DEBUG_SERIAL.print(F("[T1] plan #")); // 日志: 方案号
                 DEBUG_SERIAL.println(n);
+                // 扫码装置在车辆右侧: 扫码完成后左转180°回正，再执行后续任务
+                Cart.rotateAngle(180.0f, 800);
+                _waitCartDone();
                 _step = STEP_T1_TRACK_COLLECT; // 下一步: 开始收料
-            } else {                   // 扫到非法数字
-                DEBUG_SERIAL.print(F("[T1] invalid scan=")); // 日志
-                DEBUG_SERIAL.println(n);
-                _step = STEP_T1_TO_QR; // 回去重新定位再扫
             }
-        } else if (millis() - _scanStartMs > 10000UL) { // 超过10秒没扫到
-            DEBUG_SERIAL.println(F("[T1] scan timeout, re-position")); // 日志
-            _step = STEP_T1_TO_QR;     // 回去重新定位再扫
+            // 非法值忽略，继续等下一帧（不做任何动作，不移动）
         }
         break;
     }
 
     // ---- 收料: 持续循迹不停车，到达拾取点时记录并收格 ----
-    //   收格旋转只需前 ROTATE_AT 个拾取点触发（最后一块进仓后不转72°）；
+    //   触发收格的里程碑只保留前4个；第5块在循迹总里程处收入；
     //   36°遮蔽在【识别完成之后】的 STEP_T1_SHIELD 执行，不在此阶段。
     case STEP_T1_TRACK_COLLECT: {
-        // 5个拾取点位置，单位 mm（占位值，需实测）
-        static const float milestoneMM[5] = { 396.6f, 872.6f, 1348.5f, 1824.5f, 2300.4f };
-        // 总循迹距离，单位 mm（覆盖5个取料点，占位值）
-        static const float totalMM = 2300.4f;
-        // 需要转72°收格的拾取点个数（只前4个；第5块进仓后不转）
-        static const uint8_t ROTATE_AT = 4;
+        // 触发转盘收格的拾取点（只前4个），单位 mm（占位值，需实测）
+        static const float milestoneMM[4] = { 246.6f, 722.6f, 1198.5f, 1674.5f };
+        // 总循迹距离（= 第5块所在位置），单位 mm（占位值，需实测）
+        static const float totalMM = 2150.4f;
 
         if (!_busy) {
             // 首次进入: 启动持续循迹（不停车）
@@ -675,25 +715,25 @@ void TaskFlow_Update() {
             _finalHalf = false;
             _busy = true;
         } else {
-            // 到达当前拾取点（左右轮【都】达到才触发），物块已进入车头仓
-            if (_collectIdx < 5 && TurntableMotor.isDone() &&
+            // 前4个拾取点: 物块进车头仓 → 转72°腾出下一空仓
+            if (_collectIdx < 4 && TurntableMotor.isDone() &&
                 (MotorL.currentStep() >= (long)(milestoneMM[_collectIdx] * WHEEL_STEPS_PER_MM) &&
                  MotorR.currentStep() >= (long)(milestoneMM[_collectIdx] * WHEEL_STEPS_PER_MM))) {
                 TurntableMotor.occupyFront();             // 标记车头仓已占用
+                TurntableMotor.rotateMultiples(1, 200);   // 转72°，下一空仓到车头
                 DEBUG_SERIAL.print(F("[T1] block #"));
                 DEBUG_SERIAL.println(_collectIdx);
-                // 前 ROTATE_AT 个拾取点收完后转72°腾出下一空仓；最后一个不转
-                if (_collectIdx < ROTATE_AT) {
-                    TurntableMotor.rotateMultiples(1, 200);
-                }
                 _collectIdx++;
             }
-            // 循迹完成且5块都收完 → 进入颜色识别（36°遮蔽放到识别后 STEP_T1_SHIELD）
-            if (Cart.isDone() && _collectIdx >= 5 && TurntableMotor.isDone()) {
+            // 循迹走完总里程: 第5块已进入车头仓 → 记录占用，进入颜色识别
+            if (Cart.isDone() && _collectIdx == 4 && TurntableMotor.isDone()) {
+                TurntableMotor.occupyFront();             // 第5块进车头仓
+                _collectIdx++;
                 DEBUG_SERIAL.println(F("[T1] 5 blocks collected"));
                 _busy = false;
                 _detectIdx = 0;
-                _step = STEP_T1_DETECT_CELL;
+                for (uint8_t i = 0; i < 5; i++) { _cellOk[i] = false; } // 识别前清标记
+                _step = STEP_T1_DETECT_CELL;              // 36°遮蔽在 SHIELD 阶段
             }
         }
         break;
@@ -710,15 +750,17 @@ void TaskFlow_Update() {
             _busy = false;            // 清除标记
             ColorSensors.begin();     // 启动一轮颜色测量(约0.4s)
             _detectT0 = millis();     // 记下测量开始时刻(3s超时用)
+            _detectRetry = 0;         // 重试计数清零
             _step = STEP_T1_DETECT_WAIT; // 下一步: 等测量结果
         }
         break;
 
-    // ---- 等待颜色测量完成，把颜色记到该仓 ----
+    // ---- 等待颜色测量完成，把颜色记到该仓；超时重试，仍失败则标记跳过 ----
     case STEP_T1_DETECT_WAIT: {
         if (ColorSensors.available()) { // 测量完成，有结果了?
             uint8_t col = (uint8_t)ColorSensors.color(); // 取颜色码
             TurntableMotor.setCellColor(_detectIdx, col); // 记录: 该仓=该颜色
+            _cellOk[_detectIdx] = true; // 该仓识别成功，可摆放
             DEBUG_SERIAL.print(F("[T1] cell "));  // 日志: 仓号
             DEBUG_SERIAL.print(_detectIdx);
             DEBUG_SERIAL.print(F(" = "));
@@ -730,14 +772,24 @@ void TaskFlow_Update() {
                 _step = STEP_T1_SHIELD; // 下一步: 转36°遮蔽开口，再摆放
             }
         } else if (millis() - _detectT0 > 3000UL) { // 超过3秒没测到
-            DEBUG_SERIAL.print(F("[T1] cell "));  // 日志: 该仓超时
-            DEBUG_SERIAL.print(_detectIdx);
-            DEBUG_SERIAL.println(F(" detect timeout"));
-            _detectIdx++;             // 跳过该仓，继续下一个
-            if (_detectIdx < 5) {
-                _step = STEP_T1_DETECT_CELL;
-            } else {
-                _step = STEP_T1_SHIELD;
+            if (_detectRetry < 2) {   // 重试: 重新测量（最多重试2次）
+                _detectRetry++;
+                DEBUG_SERIAL.print(F("[T1] cell "));  // 日志: 重试
+                DEBUG_SERIAL.print(_detectIdx);
+                DEBUG_SERIAL.println(F(" detect retry"));
+                ColorSensors.begin(); // 重新开始一轮测量
+                _detectT0 = millis();
+            } else {                  // 重试耗尽: 标记该仓不可放，继续下一仓
+                _cellOk[_detectIdx] = false;
+                DEBUG_SERIAL.print(F("[T1] cell "));  // 日志: 放弃该仓
+                DEBUG_SERIAL.print(_detectIdx);
+                DEBUG_SERIAL.println(F(" detect failed, skip"));
+                _detectIdx++;         // 跳过该仓
+                if (_detectIdx < 5) {
+                    _step = STEP_T1_DETECT_CELL;
+                } else {
+                    _step = STEP_T1_SHIELD;
+                }
             }
         }
         break;
@@ -811,6 +863,7 @@ void TaskFlow_DebugRunCollectT1(uint8_t plan) {
 // 任务1逐仓颜色识别阶段: 5仓识别完停止
 void TaskFlow_DebugRunDetectT1() {
     _detectIdx = 0;
+    for (uint8_t i = 0; i < 5; i++) { _cellOk[i] = false; } // 识别前清标记
     _busy = false;
     _debugRun(STEP_T1_DETECT_CELL, STEP_T1_SHIELD);
 }

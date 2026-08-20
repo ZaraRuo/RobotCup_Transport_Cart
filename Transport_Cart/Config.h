@@ -55,10 +55,6 @@ const uint8_t LS_BACK_PINS[LS_BACK_COUNT] = {
 #define PUSH_ROD_IN2_PIN    23
 #define PUSH_ROD_ENA_PIN    24
 
-// 推杆单程全程运行时间 (ms)
-// 伸到顶/伸到底各运行该时长后自动停止（推杆无位置反馈，靠时间覆盖全程）
-#define PUSH_ROD_TRAVEL_MS  10000UL
-
 // ========================
 // 二维码扫描模块
 // ========================
@@ -81,8 +77,12 @@ const uint8_t LS_BACK_PINS[LS_BACK_COUNT] = {
 // 步距角 1.8°, 细分数 32 → 200 × 32 = 6400 脉冲/圈
 #define STEPPER_STEPS_PER_REV        6400
 
-// 默认每步间隔 1200us（极慢速，用于 reset() 后的安全默认值）
-#define STEPPER_DEFAULT_STEP_TIME    1200
+// 全局运动速度倍率: 所有步进运动(车轮/转盘)的每步间隔统一除以该值
+// 2 = 所有运动速度提高一倍（间隔减半）
+#define SPEED_BOOST                  2
+
+// 默认每步间隔（reset() 后的安全默认值，已按 SPEED_BOOST 折半）
+#define STEPPER_DEFAULT_STEP_TIME    600
 
 // 最小每步间隔 80us（最大速度下限，防止丢步）
 #define STEPPER_MIN_STEP_TIME        80
@@ -143,9 +143,15 @@ const uint8_t LS_BACK_PINS[LS_BACK_COUNT] = {
 // ========================
 // 循迹修正参数
 // ========================
-// 最大修正量 (us): 偏移=100 时慢轮额外延迟量
-// 偏移较小时按比例缩小，实现连续无级修正
-// 值越大回正力越强，但过大可能导致震荡
-#define TRACK_MAX_CORRECTION_US     1000
+// 修正死区: |偏移| 小于该值时视为居中，不修正
+// 消除直线上传感器量化噪声引起的持续微小修正/来回摆动
+#define TRACK_DEADBAND              12
+
+// 线性修正边界: 死区~边界内按比例修正，超过边界直接用最大修正（弯道强力介入）
+#define TRACK_CORRECTION_BOUND      25
+
+// 最大修正量 (us): 偏移=边界时慢轮额外延迟量
+// 值越大回正力越强，但过大容易过冲导致来回摆动（速度翻倍后已从1000调低到600）
+#define TRACK_MAX_CORRECTION_US     600
 
 #endif

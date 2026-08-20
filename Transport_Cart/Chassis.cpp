@@ -62,9 +62,9 @@ void Chassis::_applyMotion() {
 // 循迹运动控制: 读取传感器偏移量，动态调节左右轮速度
 //
 // 比例修正逻辑:
-//   偏移量越大 → 内侧轮减速越多 → 回正力越强
-//   偏移量=100 时达到最大修正 TRACK_MAX_CORRECTION_US
-//   偏移量较小（如10）时修正很小，实现无级平滑修正
+//   死区内(|偏移|≤TRACK_DEADBAND)视为居中，不修正 → 消除直线上持续微调/摆动
+//   死区~边界(TRACK_CORRECTION_BOUND)内按比例修正，偏移越大内侧轮减速越多
+//   超过边界直接用最大修正 TRACK_MAX_CORRECTION_US（弯道强力介入）
 //
 // 前后向一致: 共用同一套基础速度和修正逻辑
 void Chassis::_applyTracking() {
@@ -76,12 +76,11 @@ void Chassis::_applyTracking() {
     unsigned long usL = _trackBaseL;
     unsigned long usR = _trackBaseR;
 
-    if (offset != 0) {
-        int8_t mag = offset > 0 ? offset : -offset;
-        // ±25 内线性修正，超出则最大幅度（弯道强力介入）
+    int8_t mag = offset > 0 ? offset : -offset;
+    if (mag > TRACK_DEADBAND) {   // 死区内不修正
         unsigned long correction;
-        if (mag <= 25) {
-            correction = (unsigned long)mag * TRACK_MAX_CORRECTION_US / 25;
+        if (mag <= TRACK_CORRECTION_BOUND) {
+            correction = (unsigned long)mag * TRACK_MAX_CORRECTION_US / TRACK_CORRECTION_BOUND;
         } else {
             correction = TRACK_MAX_CORRECTION_US;
         }
@@ -98,12 +97,13 @@ void Chassis::_applyTracking() {
     MotorL.runCycle(forward, usL);
     MotorR.runCycle(forward, usR);
 
-    // 步数达到目标时终止（防走丢后无限运行）
+    // 步数达到目标时终止（左右轮【都】到达才停，弯道上以慢轮为准；
+    // 与 TaskFlow 收料里程碑"两轮都到"的判据一致）
     bool done;
     if (_targetStepsL > 0) {
-        done = MotorL.currentStep() >= _targetStepsL || MotorR.currentStep() >= _targetStepsR;
+        done = MotorL.currentStep() >= _targetStepsL && MotorR.currentStep() >= _targetStepsR;
     } else {
-        done = MotorL.currentStep() <= _targetStepsL || MotorR.currentStep() <= _targetStepsR;
+        done = MotorL.currentStep() <= _targetStepsL && MotorR.currentStep() <= _targetStepsR;
     }
     if (done) {
         _state = CS_IDLE;
@@ -121,11 +121,11 @@ bool Chassis::moveDistance(long steps, unsigned long stepUs) {
 }
 
 // 定点旋转: 左右轮反向等速，原地自旋
-// steps: +CCW(左转), -CW(右转)
+// steps: +CCW(左转) = 左轮后退、右轮前进; -CW(右转) = 左轮前进、右轮后退
 // 注意: steps 表示每轮的步数，非角度
 bool Chassis::rotate(long steps, unsigned long stepUs) {
     _rotateCont = false;
-    return moveDiff(steps, -steps, stepUs, stepUs);
+    return moveDiff(-steps, steps, stepUs, stepUs);
 }
 
 // 定角度旋转: 自动换算步数
